@@ -1,0 +1,14 @@
+{
+  "ExpandedNodes": [
+    "",
+    "\\data",
+    "\\evaluate",
+    "\\inference",
+    "\\models",
+    "\\requirements",
+    "\\results",
+    "\\training"
+  ],
+  "SelectedNode": "\\training\\train.py",
+  "PreviewInSolutionExplorer": false
+}
