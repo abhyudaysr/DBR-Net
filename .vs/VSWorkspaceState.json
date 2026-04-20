@@ -2,13 +2,15 @@
   "ExpandedNodes": [
     "",
     "\\data",
+    "\\data\\train",
     "\\evaluate",
     "\\inference",
+    "\\losses",
     "\\models",
     "\\requirements",
     "\\results",
     "\\training"
   ],
-  "SelectedNode": "\\training\\train.py",
+  "SelectedNode": "\\evaluate\\evaluate.py",
   "PreviewInSolutionExplorer": false
 }

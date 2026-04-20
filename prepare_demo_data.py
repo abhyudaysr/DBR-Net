@@ -22,5 +22,5 @@ for filename in os.listdir(gt_dir):
     out_path = os.path.join(input_dir, filename)
     cv2.imwrite(out_path, degraded)
 
-print("✅ Demo degraded frames generated in ./data/input_frames")
+print("Demo degraded frames generated in ./data/input_frames")
 

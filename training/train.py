@@ -1,89 +1,111 @@
-﻿import torch
+﻿import os
+import torch
 import torch.nn as nn
 import torch.optim as optim
-import sys
-import os
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 from torch.utils.data import DataLoader
-from models.sten_lite import STEN_Lite
-from training.utils import SimpleFrameDataset, save_checkpoint
+from tqdm import tqdm
+from torchmetrics.functional import peak_signal_noise_ratio as psnr_func
+from torchmetrics.functional import structural_similarity_index_measure as ssim_func
 
+# Imports
+from models.dbr_net import DBRNet
+from datasets.underwater_dataset import UnderwaterDataset 
 
-def train_demo():
-    # Define device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"✅ Using device: {device}")
+def train():
+    # --- CONFIGURATION ---
+    EPOCHS = 100
+    BATCH_SIZE = 8
+    LR = 1e-4
+    IMG_SIZE = 256
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    train_dir = "data/train" 
+    
+    print(f"--- Starting Training (Target: High PSNR) on {DEVICE} ---")
+    
+    # 1. Data Setup
+    try:
+        dataset = UnderwaterDataset(train_dir, size=IMG_SIZE)
+        loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+        print(f"Dataset Size: {len(dataset)} images") # Confirms your reduction
+    except Exception as e:
+        print(f"❌ Error loading data: {e}")
+        return
 
- 
-    # Dataset paths
-    input_path = './data/train/input'
-    target_path = './data/train/target'
+    # 2. Model Setup
+    model = DBRNet().to(DEVICE)
+    optimizer = optim.Adam(model.parameters(), lr=LR, betas=(0.9, 0.999))
+    
+    # 3. Loss Functions
+    # L1 Loss = Brightness/Color Accuracy (Crucial for high PSNR)
+    # SSIM Loss = Structure/Sharpness
+    criterion_l1 = nn.L1Loss()
+    
+    # Check for existing checkpoint
+    start_epoch = 0
+    if os.path.exists("results/checkpoints/dbrnet_best.pth"):
+        print("Loading previous best model...")
+        # We add map_location=torch.device('cpu') to fix the error
+        model.load_state_dict(torch.load("results/checkpoints/dbrnet_best.pth", map_location=torch.device('cpu')))
 
-    batch_size = 2
-    lr = 1e-4
-    epochs = 20
-    checkpoint_path = './results/checkpoints/demo.pth'
+    # Tracking Best Metrics
+    best_psnr = 0.0
+    best_ssim = 0.0
 
-    # Load dataset
-    ds = SimpleFrameDataset(input_path, target_path, size=(256, 256))
-    dl = DataLoader(ds, batch_size=batch_size, shuffle=True)
-
-    # Initialize model, optimizer, loss
-    model = STEN_Lite().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=3e-4)
-
-    # StepLR scheduler - reduces LR every few epochs
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
-
-    criterion = nn.MSELoss()
-
-    print(f"Initial Learning Rate: {optimizer.param_groups[0]['lr']}")
-
-    # ✅ For mixed precision
-    scaler = torch.cuda.amp.GradScaler()
-
-    print(f"✅ Model running on: {next(model.parameters()).device}")
-
-    # Training loop
-    for epoch in range(epochs):
+    # 4. Training Loop
+    for epoch in range(start_epoch, EPOCHS):
         model.train()
-        running_loss = 0.0
-
-        for imgs, gt in dl:
-            imgs = imgs.to(device)
-            gt = gt.to(device)
-
+        loop = tqdm(loader, leave=True)
+        
+        total_loss = 0
+        total_psnr = 0
+        total_ssim = 0
+        
+        for inputs, targets in loop:
+            inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
+            
             optimizer.zero_grad()
+            outputs = model(inputs)
+            
+            # --- LOSS CALCULATION ---
+            loss_l1 = criterion_l1(outputs, targets)
+            loss_ssim_val = 1 - ssim_func(outputs, targets, data_range=1.0)
+            
+            # Weighted Loss: 85% Color/Brightness, 15% Structure
+            loss = (0.85 * loss_l1) + (0.15 * loss_ssim_val)
+            
+            loss.backward()
+            optimizer.step()
+            
+            # --- METRICS ---
+            batch_psnr = psnr_func(outputs, targets, data_range=1.0)
+            batch_ssim = ssim_func(outputs, targets, data_range=1.0)
+            
+            total_loss += loss.item()
+            total_psnr += batch_psnr.item()
+            total_ssim += batch_ssim.item()
+            
+            loop.set_description(f"Epoch [{epoch+1}/{EPOCHS}]")
+            loop.set_postfix(loss=f"{loss.item():.4f}", psnr=f"{batch_psnr.item():.2f}")
 
-            # ✅ Initialize ConvLSTM state
-            state = model.convlstm.init_state(imgs.size(0), (imgs.shape[2], imgs.shape[3]), device)
+        # End of Epoch Stats
+        avg_psnr = total_psnr / len(loader)
+        avg_ssim = total_ssim / len(loader)
+        
+        # Save Best Model
+        if avg_psnr > best_psnr:
+            best_psnr = avg_psnr
+            best_ssim = avg_ssim # Capture SSIM at best PSNR
+            os.makedirs("results/checkpoints", exist_ok=True)
+            torch.save(model.state_dict(), "results/checkpoints/dbrnet_best.pth")
+            print(f"   🌟 New Best PSNR: {best_psnr:.2f} dB | SSIM: {best_ssim:.3f}")
 
-            # ✅ Mixed precision forward + backward
-            with torch.cuda.amp.autocast():
-                out = model(imgs, state)
-                if isinstance(out, tuple):
-                    out = out[0]
-                out = torch.clamp(out, 0, 1)
-                loss = criterion(out, gt)
-
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
-            running_loss += loss.item()
-
-        avg_loss = running_loss / len(dl)
-        print(f"[Epoch {epoch+1}/{epochs}] Loss: {avg_loss:.4f}")
-
-        scheduler.step()  # Add this here
-        save_checkpoint(model, optimizer, epoch, checkpoint_path)
-
-        save_checkpoint(model, optimizer, epoch, checkpoint_path)
-
-    print(f"🎯 Training complete. Model saved to {checkpoint_path}")
-
+    # --- FINAL SUMMARY ---
+    print("\n" + "="*40)
+    print(f"TRAINING COMPLETE")
+    print(f"Best PSNR Achieved: {best_psnr:.4f} dB")
+    print(f"Best SSIM Achieved: {best_ssim:.4f}")
+    print("="*40 + "\n")
 
 if __name__ == "__main__":
-    train_demo()
+    train()

@@ -34,7 +34,7 @@ class SimpleFrameDataset(Dataset):
         img = Image.open(input_path).convert("RGB")
         gt = Image.open(target_path).convert("RGB")
 
-        return self.transform(img), self.transform(gt)
+        return self.transform(img), self.transform(gt) 
 
 
 # Save checkpoint
